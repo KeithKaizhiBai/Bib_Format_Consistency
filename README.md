@@ -1,6 +1,6 @@
 # Normalize BibTeX to PRL Style
 
-This Python script normalizes `@article` entries in a BibTeX file to a consistent format inspired by **Physical Review Letters (PRL)**. It preserves all citation keys and leaves other entry types (e.g., `@book`, `@inproceedings`) untouched.
+This Python script normalizes `@article` entries in a BibTeX file to a consistent format inspired by **Physical Review Letters (PRL)**. It preserves all citation keys and leaves other entry types (e.g., `@book`, `@inproceedings`) untouched. Nevertheless, there are still some small bugs...
 
 ## Features
 
@@ -106,5 +106,6 @@ The canonical field order is defined in `canonical_order` and `trailing_order` i
 This script is provided as‑is for academic use. Feel free to modify it to fit your own requirements.
 
 ---
+
 
 For questions or suggestions, please contact the author or open an issue on the repository where this script was obtained.
