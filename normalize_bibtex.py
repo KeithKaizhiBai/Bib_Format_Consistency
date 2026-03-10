@@ -173,6 +173,21 @@ SMALL_WORDS = frozenset(
     "a an the and or but in on at to for of with by as from is was are were been be have has had do does did will would could should may might must can".split()
 )
 
+# Proper nouns / adjectives in titles: force first letter uppercase via $\mathrm{X}$rest
+NAME_FORCE_MATH = frozenset(
+    "dirac berry hall fermi abelian majorana weyl landau aharonov anandan chern bohr jones"
+    "klein gordon heisenberg schrodinger pauli bragg wigner yang mills maxwell newton neumann"
+    "lagrangian hamiltonian euler bernoulli cauchy riemann gauss schwinger clifford andreev"
+    "stoner wohlfarth van waals brillouin".split()
+)
+
+
+def _is_force_math_name(core_lower):
+    """True if word is a known name (or possessive like Berry's) that may need $\\mathrm{X}$rest."""
+    if core_lower in NAME_FORCE_MATH:
+        return True
+    return any(core_lower.startswith(name + "'") for name in NAME_FORCE_MATH)
+
 
 def strip_braces(s):
     """Remove outer braces from a BibTeX value, unify quotes."""
@@ -339,16 +354,82 @@ def normalize_title(title_str):
         if re.match(r'^\s+$', w):
             out.append(w)
             continue
-        if cap_next or w.strip().lower() not in SMALL_WORDS:
-            # Capitalize first letter only (preserve rest e.g. Dirac)
-            if len(w) > 0 and w[0].isalpha():
-                w = w[0].upper() + w[1:]
-        else:
-            if len(w) > 0 and w[0].isalpha():
-                w = w[0].lower() + w[1:]
+        # Protect LaTeX/math segments entirely (e.g. $\mathbb{Z}_2$, \mathrm, etc.)
+        if '\\' in w or '$' in w:
+            out.append(w)
+            # After LaTeX/math, keep current cap_next logic based on punctuation only
+            cap_next = (w.strip().endswith(':') or w.strip().endswith('?'))
+            continue
+
+        w_orig = w  # keep original for "only force when source was lowercase" check
+        # Find first alphabetic character position (to handle leading braces, quotes, etc.)
+        alpha_idx = None
+        for idx, ch in enumerate(w):
+            if ch.isalpha():
+                alpha_idx = idx
+                break
+
+        if alpha_idx is not None:
+            # Decide whether this word should be capitalized or lowercased
+            should_cap = cap_next or w.strip().lower() not in SMALL_WORDS
+            ch = w[alpha_idx]
+            if should_cap:
+                w = w[:alpha_idx] + ch.upper() + w[alpha_idx + 1:]
+            else:
+                w = w[:alpha_idx] + ch.lower() + w[alpha_idx + 1:]
+            # Force first letter via $\mathrm{X}$rest: possessive always; non-first-word always; first word skip (no redundant format)
+            core_lower = w.strip().strip('{}').lower()
+            need_force = _is_force_math_name(core_lower) and ("'" in core_lower or not cap_next)
+            if need_force:
+                w = w[:alpha_idx] + "$\\mathrm{" + w[alpha_idx].upper() + "}$" + w[alpha_idx + 1:]
+            if "-" in w and not need_force:
+                # Hyphenated: e.g. Non-Abelian -> Non-$\mathrm{A}$belian
+                subparts = w.split("-")
+                new_parts = []
+                for j, part in enumerate(subparts):
+                    pl = part.strip().strip('{}').lower()
+                    idx_first = next((k for k, c in enumerate(part) if c.isalpha()), None)
+                    if pl in NAME_FORCE_MATH and idx_first is not None:
+                        part = part[:idx_first] + "$\\mathrm{" + part[idx_first].upper() + "}$" + part[idx_first + 1:]
+                    new_parts.append(part)
+                w = "-".join(new_parts)
         out.append(w)
         # After colon/question, next word should be capitalized; do not reset cap_next
         cap_next = (w.strip().endswith(':') or w.strip().endswith('?'))
+    result = "".join(out)
+    result = _format_chemical_formulas_in_title(result)
+    return result
+
+
+def _format_chemical_formulas_in_title(title):
+    """
+    In plain-text segments (outside $...$), convert chemical formulas like Bi_2Se_3 or MnBi2Te4
+    to $\\mathrm{Bi}_2\\mathrm{Se}_3$ so element symbols are forced uppercase.
+    """
+    # Split by $ so we only modify text outside math
+    parts = re.split(r'(\$[^$]*\$)', title)
+    out = []
+    for i, seg in enumerate(parts):
+        if seg.startswith('$') and seg.endswith('$'):
+            out.append(seg)
+            continue
+        # In plain text: find runs of element(s)+subscript(s), min length 3 to avoid single letters
+        def replace_formula(m):
+            run = m.group(0)
+            if len(run) < 3:
+                return run
+            # Break into (Element)(subscript)*; element = [A-Z][a-z]?, subscript = _\d+ or \d+
+            tokens = re.findall(r'([A-Z][a-z]?)((?:_\d+|\d+)*)', run)
+            if not tokens:
+                return run
+            s = []
+            for elem, sub in tokens:
+                s.append("\\mathrm{" + elem + "}")
+                if sub:
+                    s.append("_" + sub.replace("_", ""))
+            return "$" + "".join(s) + "$"
+        seg = re.sub(r'(?:[A-Z][a-z]?(?:_\d+|\d+)*)+', replace_formula, seg)
+        out.append(seg)
     return "".join(out)
 
 
@@ -567,6 +648,29 @@ def format_entry_prl(entry):
     return "\n".join(lines)
 
 
+def format_entry_title_only(entry):
+    """Format any entry type with only title normalized. Uses the same normalize_title() as
+    article (including first-word exception and name $\\mathrm{X}$rest), so title rules
+    apply uniformly to inbook, book, incollection, etc."""
+    etype = entry.get("ENTRYTYPE") or entry.get("type", "misc")
+    key = _entry_key(entry)
+    fields = _entry_fields(entry)
+    title = get_field(entry, "title")
+    if title:
+        set_field(fields, "title", normalize_title(title))
+    # Output: title first if present, then rest alphabetically
+    order_keys = ["title"] + sorted([k for k in fields if k.lower() != "title"], key=lambda x: x.lower())
+    ordered = [(k, fields[k]) for k in order_keys if k in fields]
+    lines = ["@" + etype + "{" + key + ","]
+    for i, (k, v) in enumerate(ordered):
+        val = (v.strip() if isinstance(v, str) else str(v))
+        val = "{" + val + "}"
+        comma = "," if i < len(ordered) - 1 else ""
+        lines.append(f"  {k} = {val}{comma}")
+    lines.append("}")
+    return "\n".join(lines)
+
+
 def split_bib_entries(content):
     """Split bib file content into list of (entry_type, key, raw_block)."""
     entries = []
@@ -632,8 +736,10 @@ def parse_bib_file(path):
 
 def write_bib_file_from_raw(content, out_path):
     """
-    Split content into entries. For @article: parse and output normalized.
-    For others: output raw block unchanged.
+    Split content into entries. For @article: full PRL normalization (includes title).
+    For any other type (inbook, book, incollection, etc.): same title normalization rules
+    (normalize_title, including first-word exception and name $\\mathrm{X}$rest) when the
+    entry has a title; only the title field is normalized, rest preserved.
     """
     entries = split_bib_entries(content)
     output = []
@@ -645,7 +751,11 @@ def write_bib_file_from_raw(content, out_path):
             else:
                 output.append(raw_block)
         else:
-            output.append(raw_block)
+            parsed = parse_single_entry(raw_block)
+            if parsed and get_field(parsed, "title") is not None:
+                output.append(format_entry_title_only(parsed))
+            else:
+                output.append(raw_block)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n\n".join(output))
         f.write("\n")
